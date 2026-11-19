@@ -17,7 +17,7 @@ jobs:
     timeout-minutes: 240
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
-      DERIVED_DATA: ${{ runner.temp }}/firefox-derived
+      DERIVED_DATA: ${{ github.workspace }}/.firefox-derived
 
     steps:
       - name: Check out official Mozilla Firefox 160.1
