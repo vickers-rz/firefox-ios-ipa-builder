@@ -1,0 +1,118 @@
+name: Build Firefox iOS 160.1 unsigned IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firefox-ios-1601-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Compile iOS arm64 IPA (Xcode 27.1)
+    runs-on: xcode-27
+    timeout-minutes: 240
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+      DERIVED_DATA: ${{ runner.temp }}/firefox-derived
+
+    steps:
+      - name: Check out official Mozilla Firefox 160.1
+        uses: actions/checkout@v4
+        with:
+          repository: mozilla-mobile/firefox-ios
+          ref: firefox-v160.1
+          path: firefox-src
+          persist-credentials: false
+
+      - name: Verify tag, toolchain, disk and deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          node --version
+          git -C firefox-src describe --tags --exact-match
+          df -h .
+          test -f firefox-src/firefox-ios/Client.xcodeproj/project.pbxproj
+
+      - name: Bootstrap Mozilla dependencies and browser scripts
+        shell: bash
+        working-directory: firefox-src
+        run: |
+          set -euo pipefail
+          sh ./bootstrap.sh
+
+      - name: Resolve Swift packages
+        shell: bash
+        working-directory: firefox-src
+        run: |
+          set -euo pipefail
+          xcodebuild -resolvePackageDependencies \
+            -project firefox-ios/Client.xcodeproj \
+            -scheme Fennec
+
+      - name: Build physical-device app without signing
+        shell: bash
+        working-directory: firefox-src
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project firefox-ios/Client.xcodeproj \
+            -scheme Fennec \
+            -configuration Debug \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$DERIVED_DATA" \
+            -jobs 3 \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            build 2>&1 | tee "$RUNNER_TEMP/firefox-build.log"
+
+      - name: Package unsigned IPA and SHA-256 checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP=$(find "$DERIVED_DATA/Build/Products" -type d -name 'Client.app' -prune -print -quit)
+          test -n "$APP" || { echo '::error::Client.app missing'; exit 1; }
+          EXECUTABLE=$(plutil -extract CFBundleExecutable raw -o - "$APP/Info.plist")
+          MIN_IOS=$(plutil -extract MinimumOSVersion raw -o - "$APP/Info.plist")
+          ARCHS=$(lipo -archs "$APP/$EXECUTABLE")
+          echo "iOS minimum: $MIN_IOS"
+          echo "Architecture: $ARCHS"
+          [[ " $ARCHS " == *" arm64 "* ]] || { echo '::error::Not an iOS arm64 binary'; exit 1; }
+          mkdir -p "$RUNNER_TEMP/ipa-stage/Payload" "$GITHUB_WORKSPACE/dist"
+          ditto "$APP" "$RUNNER_TEMP/ipa-stage/Payload/Client.app"
+          (
+            cd "$RUNNER_TEMP/ipa-stage"
+            zip -qry "$GITHUB_WORKSPACE/dist/Firefox-iOS-160.1-unsigned.ipa" Payload
+          )
+          (
+            cd "$GITHUB_WORKSPACE/dist"
+            shasum -a 256 Firefox-iOS-160.1-unsigned.ipa | tee SHA256SUMS.txt
+          )
+          ls -lh "$GITHUB_WORKSPACE/dist"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: firefox-ios-160.1-unsigned-ipa
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload compilation log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firefox-ios-160.1-failure-log
+          path: ${{ runner.temp }}/firefox-build.log
+          retention-days: 3
+          if-no-files-found: ignore
